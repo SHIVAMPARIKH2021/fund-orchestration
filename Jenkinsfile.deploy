@@ -145,18 +145,12 @@ pipeline {
                     ]) {
                         sh '''
                             set +x
-                            # Pass credentials cleanly via base64 into the container shell to prevent any character stripping or escaping bugs
-                            B64_USER=$(echo -n "$RMQ_USER" | base64)
-                            B64_PASS=$(echo -n "$RMQ_PASS" | base64)
-
-                            ssh -i "$SSH_KEY" -o StrictHostKeyChecking=no ${WINDOWS_USER}@${WINDOWS_HOST} \
-                                "docker exec -i ${CONTAINER_NAME} sh -c \\"
-                                    U=\\\$(echo $B64_USER | base64 -d)
-                                    P=\\\$(echo $B64_PASS | base64 -d)
-                                    rabbitmqctl add_user \\\"\\\\\$U\\\" \\\"\\\\\$P\\\" || rabbitmqctl change_password \\\"\\\\\$U\\\" \\\"\\\\\$P\\\"
-                                    rabbitmqctl set_user_tags \\\"\\\\\$U\\\" administrator
-                                    rabbitmqctl set_permissions -p / \\\"\\\\\$U\\\" \\\".*\\\" \\\".*\\\" \\\".*\\\"
-                                \\""
+                            # Stream commands directly into container /bin/sh via stdin to bypass Windows PowerShell escaping entirely
+                            ssh -i "$SSH_KEY" -o StrictHostKeyChecking=no ${WINDOWS_USER}@${WINDOWS_HOST} "docker exec -i ${CONTAINER_NAME} /bin/sh" << EOF
+rabbitmqctl add_user "$RMQ_USER" "$RMQ_PASS" || rabbitmqctl change_password "$RMQ_USER" "$RMQ_PASS"
+rabbitmqctl set_user_tags "$RMQ_USER" administrator
+rabbitmqctl set_permissions -p / "$RMQ_USER" ".*" ".*" ".*"
+EOF
                         '''
                     }
                 }
