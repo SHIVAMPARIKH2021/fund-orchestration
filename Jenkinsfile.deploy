@@ -1,0 +1,140 @@
+pipeline {
+    agent any
+
+    options {
+        timestamps()
+        disableConcurrentBuilds()
+        buildDiscarder(logRotator(numToKeepStr: '15'))
+    }
+
+    parameters {
+        booleanParam(name: 'RESET_BROKER_DATA', defaultValue: false, description: 'Purge existing RabbitMQ volume to clear queue metadata')
+        booleanParam(name: 'FORCE_DOCKER_NO_CACHE', defaultValue: false, description: 'Force rebuild without Docker layer cache')
+    }
+
+    environment {
+        DOPPLER_TOKEN   = credentials('doppler-personal-token')
+        DOPPLER_PROJECT = 'sec-pipeline'
+        DOPPLER_CONFIG  = 'prd'
+        SSH_CREDS_ID    = 'windows-laptop-ssh'
+        IMAGE_NAME      = 'fund-rabbitmq:latest'
+        CONTAINER_NAME  = 'fund-orchestration-rabbitmq'
+    }
+
+    stages {
+        stage('Fetch Secrets from Doppler Cloud') {
+            steps {
+                script {
+                    def response = sh(
+                        script: '''
+                            curl -s --request GET \
+                              --url "https://api.doppler.com/v3/configs/config/secrets/download?project=${DOPPLER_PROJECT}&config=${DOPPLER_CONFIG}&format=json" \
+                              --header "accept: application/json" \
+                              --header "authorization: Bearer ${DOPPLER_TOKEN}"
+                        ''',
+                        returnStdout: true
+                    ).trim()
+
+                    def secrets = readJSON text: response
+                    env.WINDOWS_HOST     = secrets.WINDOWS_HOST
+                    env.WINDOWS_USER     = secrets.WINDOWS_USER
+                    env.RABBITMQ_USER    = secrets.RABBITMQ_USER ?: 'guest'
+                    env.RABBITMQ_PASS    = secrets.RABBITMQ_PASS ?: 'guest'
+                }
+            }
+        }
+
+        stage('Pre-flight: Validate Definitions JSON') {
+            steps {
+                script {
+                    readJSON file: 'config/rabbitmq/definitions.json'
+                    echo "definitions.json syntax validated."
+                }
+            }
+        }
+
+        stage('Build Baked RabbitMQ Image on Windows Host') {
+            steps {
+                withCredentials([sshUserPrivateKey(credentialsId: env.SSH_CREDS_ID, keyFileVariable: 'SSH_KEY')]) {
+                    script {
+                        def noCache = params.FORCE_DOCKER_NO_CACHE ? "--no-cache" : ""
+                        sh """
+                            tar -czf - Dockerfile config | ssh -i "\$SSH_KEY" \
+                                -o StrictHostKeyChecking=no \
+                                -o ConnectTimeout=15 \
+                                ${WINDOWS_USER}@${WINDOWS_HOST} \
+                                "docker build ${noCache} -t ${IMAGE_NAME} -"
+                        """
+                    }
+                }
+            }
+        }
+
+        stage('Deploy RabbitMQ Container') {
+            steps {
+                withCredentials([sshUserPrivateKey(credentialsId: env.SSH_CREDS_ID, keyFileVariable: 'SSH_KEY')]) {
+                    script {
+                        def wipeVolumeCmd = params.RESET_BROKER_DATA ? "docker volume rm -f rabbitmq_data | Out-Null;" : ""
+
+                        sh """
+                            ssh -i "\$SSH_KEY" \
+                                -o StrictHostKeyChecking=no \
+                                -o ConnectTimeout=15 \
+                                ${WINDOWS_USER}@${WINDOWS_HOST} \
+                                "docker stop ${CONTAINER_NAME} 2>&1 | Out-Null; \
+                                 docker rm ${CONTAINER_NAME} 2>&1 | Out-Null; \
+                                 ${wipeVolumeCmd} \
+                                 docker network create fund-pipeline-net 2>&1 | Out-Null; \
+                                 docker run -d \
+                                    --name ${CONTAINER_NAME} \
+                                    --hostname rabbitmq-broker \
+                                    --restart unless-stopped \
+                                    --network fund-pipeline-net \
+                                    -p 5672:5672 \
+                                    -p 15672:15672 \
+                                    -e RABBITMQ_DEFAULT_USER='${env.RABBITMQ_USER}' \
+                                    -e RABBITMQ_DEFAULT_PASS='${env.RABBITMQ_PASS}' \
+                                    -v rabbitmq_data:/var/lib/rabbitmq \
+                                    ${IMAGE_NAME}"
+                        """
+                    }
+                }
+            }
+        }
+
+        stage('Verify Broker Healthcheck') {
+            steps {
+                withCredentials([sshUserPrivateKey(credentialsId: env.SSH_CREDS_ID, keyFileVariable: 'SSH_KEY')]) {
+                    sh """
+                        ssh -i "\$SSH_KEY" \
+                            -o StrictHostKeyChecking=no \
+                            -o ConnectTimeout=15 \
+                            ${WINDOWS_USER}@${WINDOWS_HOST} \
+                            "for (\$i = 0; \$i -lt 15; \$i++) { \
+                                 docker exec ${CONTAINER_NAME} rabbitmq-diagnostics -q ping 2>&1 | Out-Null; \
+                                 if (\$LASTEXITCODE -eq 0) { \
+                                     Write-Output 'RabbitMQ is HEALTHY'; \
+                                     exit 0; \
+                                 } \
+                                 Start-Sleep -Seconds 3; \
+                             } \
+                             Write-Error 'RabbitMQ ping timed out'; \
+                             exit 1"
+                    """
+                }
+            }
+        }
+    }
+
+    post {
+        always {
+            cleanWs()
+        }
+        success {
+            echo "Custom RabbitMQ image built and container launched successfully."
+        }
+        failure {
+            echo "RabbitMQ deployment failed. Inspect logs above."
+        }
+    }
+}
