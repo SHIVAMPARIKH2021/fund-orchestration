@@ -26,7 +26,6 @@ pipeline {
             steps {
                 script {
                     echo "Fetching secrets from Doppler..."
-                    // Suppress command execution tracing with set +x so the Doppler token is never logged
                     def dopplerResponse = sh(
                         script: """
                             set +x
@@ -84,29 +83,21 @@ pipeline {
                     script {
                         def resetVolumeCmd = params.RESET_BROKER_DATA ? "docker volume rm rabbitmq_data ;" : ""
 
-                        // Pass credentials via environment variables and disable shell command tracing
-                        withEnv([
-                            "RMQ_USER=${env.RABBITMQ_USER}",
-                            "RMQ_PASS=${env.RABBITMQ_PASS}"
-                        ]) {
-                            sh """
-                                set +x
-                                ssh -i "\$SSH_KEY" -o StrictHostKeyChecking=no ${WINDOWS_USER}@${WINDOWS_HOST} "
-                                    docker rm -f ${CONTAINER_NAME} ;
-                                    ${resetVolumeCmd}
-                                    docker run -d \
-                                        --name ${CONTAINER_NAME} \
-                                        --hostname rabbitmq-broker \
-                                        --restart unless-stopped \
-                                        -p 5672:5672 \
-                                        -p 15672:15672 \
-                                        -v rabbitmq_data:/var/lib/rabbitmq \
-                                        -e RABBITMQ_DEFAULT_USER='\$RMQ_USER' \
-                                        -e RABBITMQ_DEFAULT_PASS='\$RMQ_PASS' \
-                                        ${IMAGE_NAME}
-                                "
-                            """
-                        }
+                        sh """
+                            set +x
+                            ssh -i "\$SSH_KEY" -o StrictHostKeyChecking=no ${WINDOWS_USER}@${WINDOWS_HOST} "
+                                docker rm -f ${CONTAINER_NAME} ;
+                                ${resetVolumeCmd}
+                                docker run -d \
+                                    --name ${CONTAINER_NAME} \
+                                    --hostname rabbitmq-broker \
+                                    --restart unless-stopped \
+                                    -p 5672:5672 \
+                                    -p 15672:15672 \
+                                    -v rabbitmq_data:/var/lib/rabbitmq \
+                                    ${IMAGE_NAME}
+                            "
+                        """
                     }
                 }
             }
@@ -115,39 +106,62 @@ pipeline {
         stage('Verify Broker Healthcheck') {
             steps {
                 withCredentials([sshUserPrivateKey(credentialsId: env.SSH_CREDS_ID, keyFileVariable: 'SSH_KEY')]) {
-                    echo "Waiting for RabbitMQ application to fully complete boot sequence..."
+                    echo "Waiting for RabbitMQ application to fully initialize..."
                     sh """
                         set +x
-                        ssh -i "\$SSH_KEY" -o StrictHostKeyChecking=no ${WINDOWS_USER}@${WINDOWS_HOST} "
-                        docker exec ${CONTAINER_NAME} rabbitmqctl await_startup --timeout 60
-                        "
+                        set +e
+
+                        for attempt in \$(seq 1 30); do
+                            echo "Readiness check attempt \${attempt}/30..."
+
+                            ssh -i "\$SSH_KEY" \
+                                -o StrictHostKeyChecking=no \
+                                -o ConnectTimeout=15 \
+                                ${WINDOWS_USER}@${WINDOWS_HOST} \
+                                "docker exec -u rabbitmq ${CONTAINER_NAME} rabbitmq-diagnostics -q check_running" > /dev/null 2>&1
+
+                            if [ \$? -eq 0 ]; then
+                                echo "RabbitMQ core application is RUNNING and operational."
+                                exit 0
+                            fi
+
+                            sleep 3
+                        done
+
+                        echo "ERROR: RabbitMQ failed to initialize within 90 seconds."
+                        exit 1
                     """
                 }
             }
         }
 
         stage('Provision RabbitMQ Admin User') {
-                steps {
-                    withCredentials([sshUserPrivateKey(credentialsId: env.SSH_CREDS_ID, keyFileVariable: 'SSH_KEY')]) {
-                        echo "Ensuring Doppler admin user is provisioned..."
-                        withEnv([
-                            "RMQ_USER=${env.RABBITMQ_USER}",
-                            "RMQ_PASS=${env.RABBITMQ_PASS}"
-                        ]) {
-                            sh """
-                                set +x
-                                ssh -i "\$SSH_KEY" -o StrictHostKeyChecking=no ${WINDOWS_USER}@${WINDOWS_HOST} "
-                                    docker exec -e USER_NAME='\$RMQ_USER' -e USER_PASS='\$RMQ_PASS' ${CONTAINER_NAME} sh -c '
-                                        rabbitmqctl add_user \"\\\$USER_NAME\" \"\\\$USER_PASS\" || rabbitmqctl change_password \"\\\$USER_NAME\" \"\\\$USER_PASS\"
-                                        rabbitmqctl set_user_tags \"\\\$USER_NAME\" administrator
-                                        rabbitmqctl set_permissions -p / \"\\\$USER_NAME\" \".*\" \".*\" \".*\"
-                                    '
-                                "
-                            """
-                        }
+            steps {
+                withCredentials([sshUserPrivateKey(credentialsId: env.SSH_CREDS_ID, keyFileVariable: 'SSH_KEY')]) {
+                    echo "Provisioning Doppler admin user..."
+                    withEnv([
+                        "RMQ_USER=${env.RABBITMQ_USER}",
+                        "RMQ_PASS=${env.RABBITMQ_PASS}"
+                    ]) {
+                        sh '''
+                            set +x
+                            # Pass credentials cleanly via base64 into the container shell to prevent any character stripping or escaping bugs
+                            B64_USER=$(echo -n "$RMQ_USER" | base64)
+                            B64_PASS=$(echo -n "$RMQ_PASS" | base64)
+
+                            ssh -i "$SSH_KEY" -o StrictHostKeyChecking=no ${WINDOWS_USER}@${WINDOWS_HOST} \
+                                "docker exec -i ${CONTAINER_NAME} sh -c \\"
+                                    U=\\\$(echo $B64_USER | base64 -d)
+                                    P=\\\$(echo $B64_PASS | base64 -d)
+                                    rabbitmqctl add_user \\\"\\\\\$U\\\" \\\"\\\\\$P\\\" || rabbitmqctl change_password \\\"\\\\\$U\\\" \\\"\\\\\$P\\\"
+                                    rabbitmqctl set_user_tags \\\"\\\\\$U\\\" administrator
+                                    rabbitmqctl set_permissions -p / \\\"\\\\\$U\\\" \\\".*\\\" \\\".*\\\" \\\".*\\\"
+                                \\""
+                        '''
                     }
                 }
             }
+        }
     }
 
     post {
@@ -155,10 +169,10 @@ pipeline {
             cleanWs()
         }
         success {
-            echo "Custom RabbitMQ image built and container launched successfully."
+            echo "RabbitMQ infrastructure deployment completed successfully."
         }
         failure {
-            echo "RabbitMQ deployment failed. Inspect logs above."
+            echo "RabbitMQ deployment failed. Inspect stage logs above."
         }
     }
 }
