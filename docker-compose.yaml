@@ -1,0 +1,92 @@
+services:
+  # ============================================================================
+  # 1. MESSAGE BROKER: RabbitMQ (~100 MB footprint, Alpine-based)
+  # ============================================================================
+  message-broker:
+    image: rabbitmq:3.13-management-alpine
+    container_name: fund-orchestration-rabbitmq
+    hostname: rabbitmq-broker
+    restart: unless-stopped
+    ports:
+      - "5672:5672"   # AMQP protocol (Producers & Consumers)
+      - "15672:15672" # Management Web UI
+    environment:
+      RABBITMQ_DEFAULT_USER: ${RABBITMQ_USER:-guest}
+      RABBITMQ_DEFAULT_PASS: ${RABBITMQ_PASS:-guest}
+    volumes:
+      - rabbitmq_data:/var/lib/rabbitmq
+      - ./config/rabbitmq/rabbitmq.conf:/etc/rabbitmq/rabbitmq.conf:ro
+      - ./config/rabbitmq/definitions.json:/etc/rabbitmq/definitions.json:ro
+    healthcheck:
+      test: ["CMD", "rabbitmq-diagnostics", "-q", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - fund-pipeline-net
+
+  # ============================================================================
+  # 2. PRODUCER: Cron scheduler running fund-etl & publishing completion events
+  # ============================================================================
+  fund-etl-cron:
+    build:
+      context: ./fund-etl
+      dockerfile: Dockerfile
+    container_name: fund-etl-cron-worker
+    restart: unless-stopped
+    depends_on:
+      message-broker:
+        condition: service_healthy
+    entrypoint: ["/bin/sh", "/app/scripts/cron_entrypoint.sh"]
+    environment:
+      CRON_SCHEDULE: ${FUND_ETL_CRON_SCHEDULE:-0 2 1 1,4,7,10 *}
+      RABBITMQ_HOST: message-broker
+      RABBITMQ_PORT: 5672
+      RABBITMQ_USER: ${RABBITMQ_USER:-guest}
+      RABBITMQ_PASS: ${RABBITMQ_PASS:-guest}
+      RABBITMQ_EXCHANGE: etl.events.exchange
+      RABBITMQ_ROUTING_KEY: fund.etl.completed
+      POSTGRES_HOST: ${POSTGRES_HOST}
+      POSTGRES_PORT: ${POSTGRES_PORT:-5432}
+      POSTGRES_DB: ${POSTGRES_DB}
+      POSTGRES_USER: ${POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+    volumes:
+      - ./scripts/cron_entrypoint.sh:/app/scripts/cron_entrypoint.sh:ro
+      - ./scripts/run_fund_etl.py:/app/scripts/run_fund_etl.py:ro
+      - fund_etl_logs:/var/log/cron
+    networks:
+      - fund-pipeline-net
+
+  # ============================================================================
+  # 3. CONSUMER: Spring Batch daemon listening for AMQP events and running job
+  # ============================================================================
+  funds-import-job:
+    image: funds-import-job:latest
+    container_name: funds-import-job-listener
+    restart: unless-stopped
+    depends_on:
+      message-broker:
+        condition: service_healthy
+    environment:
+      SPRING_RABBITMQ_HOST: message-broker
+      SPRING_RABBITMQ_PORT: 5672
+      SPRING_RABBITMQ_USERNAME: ${RABBITMQ_USER:-guest}
+      SPRING_RABBITMQ_PASSWORD: ${RABBITMQ_PASS:-guest}
+      FUND_PIPELINE_EXCHANGE: etl.events.exchange
+      FUND_PIPELINE_QUEUE: fund.import.trigger.queue
+      FUND_PIPELINE_ROUTING_KEY: fund.etl.completed
+      SPRING_DATASOURCE_URL: jdbc:postgresql://${POSTGRES_HOST}:${POSTGRES_PORT:-5432}/${POSTGRES_DB}
+      SPRING_DATASOURCE_USERNAME: ${POSTGRES_USER}
+      SPRING_DATASOURCE_PASSWORD: ${POSTGRES_PASSWORD}
+      FORCE: "false"
+    networks:
+      - fund-pipeline-net
+
+volumes:
+  rabbitmq_data:
+  fund_etl_logs:
+
+networks:
+  fund-pipeline-net:
+    driver: bridge
