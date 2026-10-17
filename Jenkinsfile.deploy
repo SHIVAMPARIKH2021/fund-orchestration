@@ -23,25 +23,25 @@ pipeline {
 
     stages {
         stage('Fetch Secrets from Doppler Cloud') {
-                    steps {
-                        script {
-                            echo "Fetching secrets from Doppler..."
-                            def dopplerResponse = sh(
-                                script: "curl -s --request GET --url 'https://api.doppler.com/v3/configs/config/secrets/download?project=sec-pipeline&config=prd&format=json' --header 'accept: application/json' --header \"authorization: Bearer ${env.DOPPLER_TOKEN}\"",
-                                returnStdout: true
-                            ).trim()
+            steps {
+                script {
+                    echo "Fetching secrets from Doppler..."
+                    def dopplerResponse = sh(
+                        script: "curl -s --request GET --url 'https://api.doppler.com/v3/configs/config/secrets/download?project=${DOPPLER_PROJECT}&config=${DOPPLER_CONFIG}&format=json' --header 'accept: application/json' --header \"authorization: Bearer ${env.DOPPLER_TOKEN}\"",
+                        returnStdout: true
+                    ).trim()
 
-                            def secrets = readJSON text: dopplerResponse
+                    def secrets = readJSON text: dopplerResponse
 
-                            env.WINDOWS_HOST  = secrets.WINDOWS_HOST
-                            env.WINDOWS_USER  = secrets.WINDOWS_USER
-                            env.RABBITMQ_USER = secrets.RABBITMQ_DEFAULT_USER
-                            env.RABBITMQ_PASS = secrets.RABBITMQ_DEFAULT_PASS
+                    env.WINDOWS_HOST  = secrets.WINDOWS_HOST
+                    env.WINDOWS_USER  = secrets.WINDOWS_USER
+                    env.RABBITMQ_USER = secrets.RABBITMQ_DEFAULT_USER
+                    env.RABBITMQ_PASS = secrets.RABBITMQ_DEFAULT_PASS
 
-                            echo "Successfully loaded secrets for host: ${env.WINDOWS_HOST}"
-                        }
-                    }
+                    echo "Successfully loaded secrets for host: ${env.WINDOWS_HOST}"
                 }
+            }
+        }
 
         stage('Pre-flight: Validate Definitions JSON') {
             steps {
@@ -72,59 +72,83 @@ pipeline {
         stage('Deploy RabbitMQ Container') {
             steps {
                 withCredentials([sshUserPrivateKey(credentialsId: env.SSH_CREDS_ID, keyFileVariable: 'SSH_KEY')]) {
-                    sh """
-                        ssh -i "\$SSH_KEY" -o StrictHostKeyChecking=no ${WINDOWS_USER}@${WINDOWS_HOST} "docker run -d \
-                            --name ${CONTAINER_NAME} \
-                            --hostname rabbitmq-broker \
-                            --restart unless-stopped \
-                            -p 5672:5672 \
-                            -p 15672:15672 \
-                            -v rabbitmq_data:/var/lib/rabbitmq \
-                            -e RABBITMQ_DEFAULT_USER='${env.RABBITMQ_USER}' \
-                            -e RABBITMQ_DEFAULT_PASS='${env.RABBITMQ_PASS}' \
-                            fund-rabbitmq:latest"
-                    """
+                    script {
+                        def resetVolumeCmd = params.RESET_BROKER_DATA ? "docker volume rm rabbitmq_data || true" : "true"
+
+                        sh """
+                            ssh -i "\$SSH_KEY" -o StrictHostKeyChecking=no ${WINDOWS_USER}@${WINDOWS_HOST} "
+                                docker rm -f ${CONTAINER_NAME} || true
+                                ${resetVolumeCmd}
+                                docker run -d \
+                                    --name ${CONTAINER_NAME} \
+                                    --hostname rabbitmq-broker \
+                                    --restart unless-stopped \
+                                    -p 5672:5672 \
+                                    -p 15672:15672 \
+                                    -v rabbitmq_data:/var/lib/rabbitmq \
+                                    -e RABBITMQ_DEFAULT_USER='${env.RABBITMQ_USER}' \
+                                    -e RABBITMQ_DEFAULT_PASS='${env.RABBITMQ_PASS}' \
+                                    ${IMAGE_NAME}
+                            "
+                        """
+                    }
                 }
             }
         }
 
         stage('Verify Broker Healthcheck') {
-                steps {
-                    withCredentials([sshUserPrivateKey(credentialsId: env.SSH_CREDS_ID, keyFileVariable: 'SSH_KEY')]) {
-                        echo "Waiting for RabbitMQ healthcheck ping..."
-                        sh '''
-                            # Allow retry loop commands to fail without terminating the shell immediately
-                            set +e
+            steps {
+                withCredentials([sshUserPrivateKey(credentialsId: env.SSH_CREDS_ID, keyFileVariable: 'SSH_KEY')]) {
+                    echo "Waiting for RabbitMQ healthcheck ping..."
+                    sh """
+                        # Allow retry loop commands to fail without terminating the shell immediately
+                        set +e
 
-                            for attempt in $(seq 1 20); do
-                                echo "Healthcheck attempt ${attempt}/20..."
+                        for attempt in \$(seq 1 20); do
+                            echo "Healthcheck attempt \${attempt}/20..."
 
-                                # Check whether RabbitMQ is responsive as the rabbitmq user
-                                ssh -i "$SSH_KEY" \
-                                    -o StrictHostKeyChecking=no \
-                                    -o ConnectTimeout=15 \
-                                    ${WINDOWS_USER}@${WINDOWS_HOST} \
-                                    "docker exec -u rabbitmq ${CONTAINER_NAME} rabbitmq-diagnostics -q ping" > /dev/null 2>&1
+                            ssh -i "\$SSH_KEY" \
+                                -o StrictHostKeyChecking=no \
+                                -o ConnectTimeout=15 \
+                                ${WINDOWS_USER}@${WINDOWS_HOST} \
+                                "docker exec -u rabbitmq ${CONTAINER_NAME} rabbitmq-diagnostics -q ping" > /dev/null 2>&1
 
-                                STATUS=$?
-                                if [ $STATUS -eq 0 ]; then
-                                    echo "RabbitMQ is HEALTHY"
-                                    exit 0
-                                fi
+                            STATUS=\$?
+                            if [ \$STATUS -eq 0 ]; then
+                                echo "RabbitMQ is HEALTHY"
+                                exit 0
+                            fi
 
-                                echo "Broker not ready yet. Retrying in 4s..."
-                                sleep 4
-                            done
+                            echo "Broker not ready yet. Retrying in 4s..."
+                            sleep 4
+                        done
 
-                            echo "================ CONTAINER LOG DUMP ================"
-                            ssh -i "$SSH_KEY" -o StrictHostKeyChecking=no ${WINDOWS_USER}@${WINDOWS_HOST} "docker logs --tail 40 ${CONTAINER_NAME}"
-                            echo "==================================================="
-                            echo "ERROR: RabbitMQ ping timed out after 80s"
-                            exit 1
-                        '''
-                    }
+                        echo "================ CONTAINER LOG DUMP ================"
+                        ssh -i "\$SSH_KEY" -o StrictHostKeyChecking=no ${WINDOWS_USER}@${WINDOWS_HOST} "docker logs --tail 40 ${CONTAINER_NAME}"
+                        echo "==================================================="
+                        echo "ERROR: RabbitMQ ping timed out after 80s"
+                        exit 1
+                    """
                 }
             }
+        }
+
+        stage('Provision RabbitMQ Admin User') {
+            steps {
+                withCredentials([sshUserPrivateKey(credentialsId: env.SSH_CREDS_ID, keyFileVariable: 'SSH_KEY')]) {
+                    echo "Ensuring Doppler admin user is provisioned..."
+                    sh """
+                        ssh -i "\$SSH_KEY" -o StrictHostKeyChecking=no ${WINDOWS_USER}@${WINDOWS_HOST} "
+                            docker exec ${CONTAINER_NAME} rabbitmqctl add_user '${env.RABBITMQ_USER}' '${env.RABBITMQ_PASS}' || \
+                            docker exec ${CONTAINER_NAME} rabbitmqctl change_password '${env.RABBITMQ_USER}' '${env.RABBITMQ_PASS}'
+
+                            docker exec ${CONTAINER_NAME} rabbitmqctl set_user_tags '${env.RABBITMQ_USER}' administrator
+                            docker exec ${CONTAINER_NAME} rabbitmqctl set_permissions -p / '${env.RABBITMQ_USER}' '.*' '.*' '.*'
+                        "
+                    """
+                }
+            }
+        }
     }
 
     post {
