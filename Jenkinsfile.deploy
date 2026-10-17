@@ -103,27 +103,29 @@ pipeline {
         }
 
         stage('Verify Broker Healthcheck') {
-            steps {
-                withCredentials([sshUserPrivateKey(credentialsId: env.SSH_CREDS_ID, keyFileVariable: 'SSH_KEY')]) {
-                    sh """
-                        ssh -i "\$SSH_KEY" \
-                            -o StrictHostKeyChecking=no \
-                            -o ConnectTimeout=15 \
-                            ${WINDOWS_USER}@${WINDOWS_HOST} \
-                            "for (\$i = 0; \$i -lt 15; \$i++) { \
-                                 docker exec ${CONTAINER_NAME} rabbitmq-diagnostics -q ping 2>&1 | Out-Null; \
-                                 if (\$LASTEXITCODE -eq 0) { \
-                                     Write-Output 'RabbitMQ is HEALTHY'; \
-                                     exit 0; \
-                                 } \
-                                 Start-Sleep -Seconds 3; \
-                             } \
-                             Write-Error 'RabbitMQ ping timed out'; \
-                             exit 1"
-                    """
+                    steps {
+                        withCredentials([sshUserPrivateKey(credentialsId: env.SSH_CREDS_ID, keyFileVariable: 'SSH_KEY')]) {
+                            echo "Waiting for RabbitMQ healthcheck ping..."
+                            sh '''
+                                for attempt in $(seq 1 15); do
+                                    echo "Healthcheck attempt ${attempt}/15..."
+                                    if ssh -i "$SSH_KEY" \
+                                           -o StrictHostKeyChecking=no \
+                                           -o ConnectTimeout=15 \
+                                           ${WINDOWS_USER}@${WINDOWS_HOST} \
+                                           "docker exec ${CONTAINER_NAME} rabbitmq-diagnostics -q ping" > /dev/null 2>&1; then
+                                        echo "RabbitMQ is HEALTHY"
+                                        exit 0
+                                    fi
+                                    sleep 3
+                                done
+
+                                echo "ERROR: RabbitMQ ping timed out after 45s"
+                                exit 1
+                            '''
+                        }
+                    }
                 }
-            }
-        }
     }
 
     post {
