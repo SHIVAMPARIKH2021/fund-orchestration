@@ -115,61 +115,39 @@ pipeline {
         stage('Verify Broker Healthcheck') {
             steps {
                 withCredentials([sshUserPrivateKey(credentialsId: env.SSH_CREDS_ID, keyFileVariable: 'SSH_KEY')]) {
-                    echo "Waiting for RabbitMQ healthcheck ping..."
+                    echo "Waiting for RabbitMQ application to fully complete boot sequence..."
                     sh """
                         set +x
-                        set +e
-
-                        for attempt in \$(seq 1 20); do
-                            echo "Healthcheck attempt \${attempt}/20..."
-
-                            ssh -i "\$SSH_KEY" \
-                                -o StrictHostKeyChecking=no \
-                                -o ConnectTimeout=15 \
-                                ${WINDOWS_USER}@${WINDOWS_HOST} \
-                                "docker exec -u rabbitmq ${CONTAINER_NAME} rabbitmq-diagnostics -q ping" > /dev/null 2>&1
-
-                            STATUS=\$?
-                            if [ \$STATUS -eq 0 ]; then
-                                echo "RabbitMQ is HEALTHY"
-                                exit 0
-                            fi
-
-                            echo "Broker not ready yet. Retrying in 4s..."
-                            sleep 4
-                        done
-
-                        echo "================ CONTAINER LOG DUMP ================"
-                        ssh -i "\$SSH_KEY" -o StrictHostKeyChecking=no ${WINDOWS_USER}@${WINDOWS_HOST} "docker logs --tail 40 ${CONTAINER_NAME}"
-                        echo "==================================================="
-                        echo "ERROR: RabbitMQ ping timed out after 80s"
-                        exit 1
+                        ssh -i "\$SSH_KEY" -o StrictHostKeyChecking=no ${WINDOWS_USER}@${WINDOWS_HOST} "
+                        docker exec ${CONTAINER_NAME} rabbitmqctl await_startup --timeout 60
+                        "
                     """
                 }
             }
         }
 
         stage('Provision RabbitMQ Admin User') {
-            steps {
-                withCredentials([sshUserPrivateKey(credentialsId: env.SSH_CREDS_ID, keyFileVariable: 'SSH_KEY')]) {
-                    echo "Ensuring Doppler admin user is provisioned..."
-                    withEnv([
-                        "RMQ_USER=${env.RABBITMQ_USER}",
-                        "RMQ_PASS=${env.RABBITMQ_PASS}"
-                    ]) {
-                        sh """
-                            set +x
-                            ssh -i "\$SSH_KEY" -o StrictHostKeyChecking=no ${WINDOWS_USER}@${WINDOWS_HOST} "
-                                docker exec ${CONTAINER_NAME} rabbitmqctl add_user '\$RMQ_USER' '\$RMQ_PASS' ;
-                                docker exec ${CONTAINER_NAME} rabbitmqctl change_password '\$RMQ_USER' '\$RMQ_PASS' ;
-                                docker exec ${CONTAINER_NAME} rabbitmqctl set_user_tags '\$RMQ_USER' administrator ;
-                                docker exec ${CONTAINER_NAME} rabbitmqctl set_permissions -p / '\$RMQ_USER' '.*' '.*' '.*'
-                            "
-                        """
+                steps {
+                    withCredentials([sshUserPrivateKey(credentialsId: env.SSH_CREDS_ID, keyFileVariable: 'SSH_KEY')]) {
+                        echo "Ensuring Doppler admin user is provisioned..."
+                        withEnv([
+                            "RMQ_USER=${env.RABBITMQ_USER}",
+                            "RMQ_PASS=${env.RABBITMQ_PASS}"
+                        ]) {
+                            sh """
+                                set +x
+                                ssh -i "\$SSH_KEY" -o StrictHostKeyChecking=no ${WINDOWS_USER}@${WINDOWS_HOST} "
+                                    docker exec -e USER_NAME='\$RMQ_USER' -e USER_PASS='\$RMQ_PASS' ${CONTAINER_NAME} sh -c '
+                                        rabbitmqctl add_user \"\\\$USER_NAME\" \"\\\$USER_PASS\" || rabbitmqctl change_password \"\\\$USER_NAME\" \"\\\$USER_PASS\"
+                                        rabbitmqctl set_user_tags \"\\\$USER_NAME\" administrator
+                                        rabbitmqctl set_permissions -p / \"\\\$USER_NAME\" \".*\" \".*\" \".*\"
+                                    '
+                                "
+                            """
+                        }
                     }
                 }
             }
-        }
     }
 
     post {
