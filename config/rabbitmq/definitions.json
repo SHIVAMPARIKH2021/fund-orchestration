@@ -1,25 +1,30 @@
 {
   "rabbit_version": "3.13.0",
-  "users": [
-    {
-      "name": "guest",
-      "password_hash": "guest",
-      "hashing_algorithm": "rabbit_password_hashing_sha256",
-      "tags": ["administrator"]
-    }
-  ],
+  "rabbitmq_version": "3.13.0",
   "vhosts": [
     {
       "name": "/"
     }
   ],
-  "permissions": [
+  "users": [],
+  "permissions": [],
+  "queues": [
     {
-      "user": "guest",
+      "name": "fund.import.trigger.queue",
       "vhost": "/",
-      "configure": ".*",
-      "write": ".*",
-      "read": ".*"
+      "durable": true,
+      "auto_delete": false,
+      "arguments": {
+        "x-dead-letter-exchange": "etl.events.dlx",
+        "x-dead-letter-routing-key": "fund.import.failed"
+      }
+    },
+    {
+      "name": "fund.import.trigger.dlq",
+      "vhost": "/",
+      "durable": true,
+      "auto_delete": false,
+      "arguments": {}
     }
   ],
   "exchanges": [
@@ -42,32 +47,13 @@
       "arguments": {}
     }
   ],
-  "queues": [
-    {
-      "name": "fund.import.trigger.queue",
-      "vhost": "/",
-      "durable": true,
-      "auto_delete": false,
-      "arguments": {
-        "x-dead-letter-exchange": "etl.events.dlx",
-        "x-dead-letter-routing-key": "fund.import.failed"
-      }
-    },
-    {
-      "name": "fund.import.trigger.dlq",
-      "vhost": "/",
-      "durable": true,
-      "auto_delete": false,
-      "arguments": {}
-    }
-  ],
   "bindings": [
     {
       "source": "etl.events.exchange",
       "vhost": "/",
       "destination": "fund.import.trigger.queue",
       "destination_type": "queue",
-      "routing_key": "fund.etl.#",
+      "routing_key": "fund.import.completed",
       "arguments": {}
     },
     {
