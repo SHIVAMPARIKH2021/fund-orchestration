@@ -109,17 +109,24 @@ pipeline {
                             sh '''
                                 for attempt in $(seq 1 15); do
                                     echo "Healthcheck attempt ${attempt}/15..."
-                                    if ssh -i "$SSH_KEY" \
+                                    OUT=$(ssh -i "$SSH_KEY" \
                                            -o StrictHostKeyChecking=no \
                                            -o ConnectTimeout=15 \
                                            ${WINDOWS_USER}@${WINDOWS_HOST} \
-                                           "docker exec ${CONTAINER_NAME} rabbitmq-diagnostics -q ping" > /dev/null 2>&1; then
+                                           "docker exec ${CONTAINER_NAME} rabbitmq-diagnostics -q ping" 2>&1)
+                                    STATUS=$?
+                                    if [ $STATUS -eq 0 ]; then
                                         echo "RabbitMQ is HEALTHY"
                                         exit 0
+                                    else
+                                        echo "Ping response: ${OUT}"
                                     fi
                                     sleep 3
                                 done
 
+                                echo "================ CONTAINER LOG DUMP ================"
+                                ssh -i "$SSH_KEY" -o StrictHostKeyChecking=no ${WINDOWS_USER}@${WINDOWS_HOST} "docker logs --tail 50 ${CONTAINER_NAME}"
+                                echo "==================================================="
                                 echo "ERROR: RabbitMQ ping timed out after 45s"
                                 exit 1
                             '''
