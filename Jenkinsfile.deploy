@@ -25,21 +25,13 @@ pipeline {
         stage('Fetch Secrets from Doppler Cloud') {
             steps {
                 script {
-                    def response = sh(
-                        script: '''
-                            curl -s --request GET \
-                              --url "https://api.doppler.com/v3/configs/config/secrets/download?project=${DOPPLER_PROJECT}&config=${DOPPLER_CONFIG}&format=json" \
-                              --header "accept: application/json" \
-                              --header "authorization: Bearer ${DOPPLER_TOKEN}"
-                        ''',
-                        returnStdout: true
-                    ).trim()
+                    // ... Doppler curl command ...
+                    def secrets = readJSON text: dopplerJson
 
-                    def secrets = readJSON text: response
                     env.WINDOWS_HOST     = secrets.WINDOWS_HOST
                     env.WINDOWS_USER     = secrets.WINDOWS_USER
-                    env.RABBITMQ_USER    = secrets.RABBITMQ_USER ?: 'guest'
-                    env.RABBITMQ_PASS    = secrets.RABBITMQ_PASS ?: 'guest'
+                    env.RABBITMQ_USER    = secrets.RABBITMQ_DEFAULT_USER
+                    env.RABBITMQ_PASS    = secrets.RABBITMQ_DEFAULT_PASS
                 }
             }
         }
@@ -73,31 +65,18 @@ pipeline {
         stage('Deploy RabbitMQ Container') {
             steps {
                 withCredentials([sshUserPrivateKey(credentialsId: env.SSH_CREDS_ID, keyFileVariable: 'SSH_KEY')]) {
-                    script {
-                        def wipeVolumeCmd = params.RESET_BROKER_DATA ? "docker volume rm -f rabbitmq_data | Out-Null;" : ""
-
-                        sh """
-                            ssh -i "\$SSH_KEY" \
-                                -o StrictHostKeyChecking=no \
-                                -o ConnectTimeout=15 \
-                                ${WINDOWS_USER}@${WINDOWS_HOST} \
-                                "docker stop ${CONTAINER_NAME} 2>&1 | Out-Null; \
-                                 docker rm ${CONTAINER_NAME} 2>&1 | Out-Null; \
-                                 ${wipeVolumeCmd} \
-                                 docker network create fund-pipeline-net 2>&1 | Out-Null; \
-                                 docker run -d \
-                                    --name ${CONTAINER_NAME} \
-                                    --hostname rabbitmq-broker \
-                                    --restart unless-stopped \
-                                    --network fund-pipeline-net \
-                                    -p 5672:5672 \
-                                    -p 15672:15672 \
-                                    -e RABBITMQ_DEFAULT_USER='${env.RABBITMQ_USER}' \
-                                    -e RABBITMQ_DEFAULT_PASS='${env.RABBITMQ_PASS}' \
-                                    -v rabbitmq_data:/var/lib/rabbitmq \
-                                    ${IMAGE_NAME}"
-                        """
-                    }
+                    sh """
+                        ssh -i "\$SSH_KEY" -o StrictHostKeyChecking=no ${WINDOWS_USER}@${WINDOWS_HOST} "docker run -d \
+                            --name ${CONTAINER_NAME} \
+                            --hostname rabbitmq-broker \
+                            --restart unless-stopped \
+                            -p 5672:5672 \
+                            -p 15672:15672 \
+                            -v rabbitmq_data:/var/lib/rabbitmq \
+                            -e RABBITMQ_DEFAULT_USER='${env.RABBITMQ_USER}' \
+                            -e RABBITMQ_DEFAULT_PASS='${env.RABBITMQ_PASS}' \
+                            fund-rabbitmq:latest"
+                    """
                 }
             }
         }
