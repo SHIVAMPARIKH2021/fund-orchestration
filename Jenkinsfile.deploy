@@ -23,18 +23,25 @@ pipeline {
 
     stages {
         stage('Fetch Secrets from Doppler Cloud') {
-            steps {
-                script {
-                    // ... Doppler curl command ...
-                    def secrets = readJSON text: dopplerJson
+                    steps {
+                        script {
+                            echo "Fetching secrets from Doppler..."
+                            def dopplerResponse = sh(
+                                script: "curl -s --request GET --url 'https://api.doppler.com/v3/configs/config/secrets/download?project=sec-pipeline&config=prd&format=json' --header 'accept: application/json' --header \"authorization: Bearer ${env.DOPPLER_TOKEN}\"",
+                                returnStdout: true
+                            ).trim()
 
-                    env.WINDOWS_HOST     = secrets.WINDOWS_HOST
-                    env.WINDOWS_USER     = secrets.WINDOWS_USER
-                    env.RABBITMQ_USER    = secrets.RABBITMQ_DEFAULT_USER
-                    env.RABBITMQ_PASS    = secrets.RABBITMQ_DEFAULT_PASS
+                            def secrets = readJSON text: dopplerResponse
+
+                            env.WINDOWS_HOST  = secrets.WINDOWS_HOST
+                            env.WINDOWS_USER  = secrets.WINDOWS_USER
+                            env.RABBITMQ_USER = secrets.RABBITMQ_DEFAULT_USER
+                            env.RABBITMQ_PASS = secrets.RABBITMQ_DEFAULT_PASS
+
+                            echo "Successfully loaded secrets for host: ${env.WINDOWS_HOST}"
+                        }
+                    }
                 }
-            }
-        }
 
         stage('Pre-flight: Validate Definitions JSON') {
             steps {
