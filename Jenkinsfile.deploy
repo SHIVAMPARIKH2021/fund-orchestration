@@ -42,7 +42,7 @@ pipeline {
                     env.WINDOWS_HOST  = secrets.WINDOWS_HOST
                     env.WINDOWS_USER  = secrets.WINDOWS_USER
                     env.RABBITMQ_USER = secrets.RABBITMQ_DEFAULT_USER
-                    env.RABBITMQ_PASS = secrets.RABBITMQ_DEFAULT_PASS
+                    env.RABBITMQ_PASS = secrets.RABBITMQ_DEFAULT_PASSWORD
 
                     echo "Successfully loaded secrets for host: ${env.WINDOWS_HOST}"
                 }

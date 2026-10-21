@@ -12,7 +12,7 @@ services:
       - "15672:15672" # Management Web UI
     environment:
       RABBITMQ_DEFAULT_USER: ${RABBITMQ_USER:-guest}
-      RABBITMQ_DEFAULT_PASS: ${RABBITMQ_PASS:-guest}
+      RABBITMQ_DEFAULT_PASSWORD: ${RABBITMQ_PASS:-guest}
     volumes:
       - rabbitmq_data:/var/lib/rabbitmq
       - ./config/rabbitmq/rabbitmq.conf:/etc/rabbitmq/rabbitmq.conf:ro
